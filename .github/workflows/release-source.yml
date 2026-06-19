@@ -1,0 +1,88 @@
+# https://github.com/kihyyo/tving
+
+name: Package and Release Source
+
+on:
+  schedule:
+    - cron: "0 */3 * * *"  # KST 기준 0, 3, 6, 9, 12, 15, 18, 21시마다 본진 변경 감지
+  workflow_dispatch:       # 수동 실행 허용
+
+jobs:
+  check-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check Out Local Repository
+        uses: actions/checkout@v4
+
+      - name: Fetch Upstream Latest Commit SHA
+        id: upstream_info
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commits = await github.rest.repos.listCommits({
+              owner: 'kihyyo',
+              repo: 'tving',
+              per_page: 1
+            });
+            const latestSha = commits.data[0].sha;
+            core.setOutput('sha', latestSha);
+
+      - name: Check If This Commit Already Released
+        id: check_tag
+        run: |
+          UPSTREAM_SHA="${{ steps.upstream_info.outputs.sha }}"
+          
+          # 이미 본진의 해당 커밋으로 생성된 릴리스가 로컬 태그에 존재하는지 확인
+          if git fetch --tags && git tag --contains "$UPSTREAM_SHA" >/dev/null 2>&1; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch Upstream Source Code
+        if: steps.check_tag.outputs.changed == 'true'
+        run: |
+          UPSTREAM_SHA="${{ steps.upstream_info.outputs.sha }}"
+          
+          # 임시 디렉토리에 본진 소스 코드만 바로 다운로드하여 압축 해제
+          mkdir -p temp_source
+          curl -L "https://github.com/kihyyo/tving/archive/${UPSTREAM_SHA}.tar.gz" | tar -xzf - --strip-components=1 -C temp_source
+          
+          # 로컬 워크스페이스 공간을 본진 소스 코드로 대체
+          rm -rf .github templates downloader.py mod_basic.py mod_program.py mod_recent.py setup.py info.yaml __init__.py 2>/dev/null || true
+          cp -r temp_source/. .
+          rm -rf temp_source
+
+      - name: Determine Version Tag
+        if: steps.check_tag.outputs.changed == 'true'
+        id: get_version
+        run: |
+          # KST(한국 표준시) 기준 현재 날짜와 시간으로 버전 명명 (예: v2026.06.19-1055)
+          USER_DATE_TAG=$(TZ="Asia/Seoul" date +"v%Y.%m.%d-%H%M")
+          echo "version=${USER_DATE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Push Git Tag to My Repository
+        if: steps.check_tag.outputs.changed == 'true'
+        run: |
+          VERSION="${{ steps.get_version.outputs.version }}"
+          UPSTREAM_SHA="${{ steps.upstream_info.outputs.sha }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 소스 변경사항 커밋 후 날짜별 버전 태그 생성 및 푸시
+          git add -A
+          git commit -m "Sync source from upstream commit ${UPSTREAM_SHA:0:7}" || true
+          git tag "$VERSION"
+          git push origin "$VERSION"
+
+      - name: Create GitHub Release
+        if: steps.check_tag.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.version }}
+          name: ${{ steps.get_version.outputs.version }}
+          body: "Tving Downloader Source Code Updated from Upstream Commit (${{ steps.upstream_info.outputs.sha }})"
