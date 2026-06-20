@@ -16,6 +16,8 @@ jobs:
     steps:
       - name: Check Out Local Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 태그 기록을 정확히 조회하기 위해 전체 기록 가져오기
 
       - name: Fetch Upstream Latest Commit SHA
         id: upstream_info
@@ -35,8 +37,8 @@ jobs:
         run: |
           UPSTREAM_SHA="${{ steps.upstream_info.outputs.sha }}"
           
-          # 이미 본진의 해당 커밋으로 생성된 릴리스가 로컬 태그에 존재하는지 확인
-          if git fetch --tags && git tag --contains "$UPSTREAM_SHA" >/dev/null 2>&1; then
+          # 내 저장소의 기존 릴리스 태그 리스트나 커밋 로그에 본진 SHA가 포함되어 있는지 검사
+          if git log --tags --grep="$UPSTREAM_SHA" >/dev/null 2>&1 || git tag -l | xargs -I {} git tag -v {} 2>/dev/null | grep "$UPSTREAM_SHA" >/dev/null 2>&1; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -51,8 +53,8 @@ jobs:
           mkdir -p temp_source
           curl -L "https://github.com/kihyyo/tving/archive/${UPSTREAM_SHA}.tar.gz" | tar -xzf - --strip-components=1 -C temp_source
           
-          # 로컬 워크스페이스 공간을 본진 소스 코드로 대체
-          rm -rf .github templates downloader.py mod_basic.py mod_program.py mod_recent.py setup.py info.yaml __init__.py 2>/dev/null || true
+          # 워크플로우를 제외한 기존 파일 삭제 후 본진 소스로 전면 교체
+          find . -maxdepth 1 ! -name '.' ! -name '..' ! -name '.git' ! -name '.github' -exec rm -rf {} +
           cp -r temp_source/. .
           rm -rf temp_source
 
@@ -60,7 +62,7 @@ jobs:
         if: steps.check_tag.outputs.changed == 'true'
         id: get_version
         run: |
-          # KST(한국 표준시) 기준 현재 날짜와 시간으로 버전 명명 (예: v2026.06.19-1055)
+          # KST(한국 표준시) 기준 현재 날짜와 시간으로 버전 명명
           USER_DATE_TAG=$(TZ="Asia/Seoul" date +"v%Y.%m.%d-%H%M")
           echo "version=${USER_DATE_TAG}" >> "$GITHUB_OUTPUT"
 
@@ -73,11 +75,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 소스 변경사항 커밋 후 날짜별 버전 태그 생성 및 푸시
+          # 추적 관리를 위해 본진 커밋 SHA를 본문에 명시하여 커밋 및 주석 달린 태그(Annotated Tag) 생성
           git add -A
-          git commit -m "Sync source from upstream commit ${UPSTREAM_SHA:0:7}" || true
-          git tag "$VERSION"
-          git push origin "$VERSION"
+          git commit -m "Sync source from upstream commit ${UPSTREAM_SHA}" || true
+          git tag -a "$VERSION" -m "Release $VERSION based on upstream commit $UPSTREAM_SHA"
+          git push origin main --tags
 
       - name: Create GitHub Release
         if: steps.check_tag.outputs.changed == 'true'
